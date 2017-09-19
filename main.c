@@ -42,16 +42,48 @@
 
 #include <rte_eal.h>
 #include <rte_common.h>
+#include <rte_lcore.h>
 
-
-int main(int argc, char **argv)
+static int
+lcore_fwder(__rte_unused void *arg)
 {
+    return 0;
+}
+
+static int
+lcore_prod(__rte_unused void *arg)
+{
+    return 0;
+}
+
+
+int
+main(int argc, char **argv)
+{
+    unsigned int lcore_id;
     int ret;
 
     ret = rte_eal_init(argc, argv);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
     }
+
+    lcore_id = rte_get_next_lcore(-1,1,0);
+    if (lcore_id == RTE_MAX_LCORE) {
+        rte_exit(EXIT_FAILURE, "Not enough lcores\n");
+    }
+    /* start the forwarder thread */
+    rte_eal_remote_launch(lcore_fwder, NULL, lcore_id);
+
+    lcore_id = rte_get_next_lcore(lcore_id,1,0);
+    if (lcore_id == RTE_MAX_LCORE) {
+        rte_exit(EXIT_FAILURE, "Not enough lcores\n");
+    }
+    /* start the producer thread */
+    rte_eal_remote_launch(lcore_prod, NULL, lcore_id);
+
+    /* wait for the threads to finish their jobs */
+    rte_eal_mp_wait_lcore();
 
     return 0;
 }
