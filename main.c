@@ -44,6 +44,7 @@
 #include <rte_common.h>
 #include <rte_lcore.h>
 #include <rte_mempool.h>
+#include <rte_ring.h>
 
 #define MEMPOOL_NAME "MSGPOOL"
 #define MEMPOOL_N 1024
@@ -52,6 +53,8 @@
 #define MEMPOOL_PRIV_DATA_SIZE 0
 
 struct rte_mempool *msg_pool;
+struct rte_ring *tx;
+struct rte_ring *rx;
 
 static int
 lcore_fwder(__rte_unused void *arg)
@@ -82,6 +85,18 @@ main(int argc, char **argv)
                                   NULL, NULL, NULL, NULL, rte_socket_id(), 0);
     if (!msg_pool) {
         rte_exit(EXIT_FAILURE, "Cannot allocate mempool\n");
+    }
+
+    tx = rte_ring_create("TX_RING", 128, rte_socket_id(),
+                         RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (!tx) {
+        rte_exit(EXIT_FAILURE, "Cannot allocate TX ring\n");
+    }
+
+    rx = rte_ring_create("RX_RING", 128, rte_socket_id(),
+                         RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (!rx) {
+        rte_exit(EXIT_FAILURE, "Cannot allocate RX ring\n");
     }
 
     lcore_id = rte_get_next_lcore(-1,1,0);
