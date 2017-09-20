@@ -39,10 +39,13 @@
  */
 
 #include <stdio.h>
+#include <stdbool.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
+#include <rte_cycles.h>
 #include <rte_lcore.h>
+#include <rte_malloc.h>
 #include <rte_mempool.h>
 #include <rte_ring.h>
 
@@ -56,15 +59,91 @@ struct rte_mempool *msg_pool;
 struct rte_ring *tx;
 struct rte_ring *rx;
 
+bool exitting;
+
+/* Forwarder */
+unsigned long fwded = 0;
+unsigned long fwd_to_send = 1000000000;
+unsigned int fwd_batch_size = 32;
+uint64_t fwd_start;
+uint64_t fwd_finish;
+
 static int
 lcore_fwder(__rte_unused void *arg)
 {
+    void **msg;
+    unsigned int received;
+    unsigned int queued;
+
+    msg = rte_malloc(NULL, sizeof(void *) * fwd_batch_size, 0);
+
+    while (!exitting) {
+        received = rte_ring_sc_dequeue_bulk(tx, msg, fwd_batch_size, NULL);
+        if (received == 0) {
+            continue;
+        }
+
+        queued = rte_ring_sp_enqueue_bulk(rx, msg, received, NULL);
+        while (queued < received) {
+            queued += rte_ring_sp_enqueue_bulk(rx, &msg[queued],
+                                               received - queued, NULL);
+        }
+
+        fwded += queued;
+    }
+    rte_free(msg);
     return 0;
 }
 
 static int
 lcore_prod(__rte_unused void *arg)
 {
+    void **txmsg;
+    void **rxmsg;
+    unsigned long sent = 0;
+    unsigned int received;
+    float secs;
+    float msgpersec;
+    const char *msgprefix;
+
+    txmsg = rte_malloc(NULL, sizeof(void *) * fwd_batch_size, 0);
+    rxmsg = rte_malloc(NULL, sizeof(void *) * fwd_batch_size, 0);
+    if (!txmsg || !rxmsg) {
+        rte_exit(EXIT_FAILURE, "Cannot get a mem to store buffers\n");
+    }
+
+    if (rte_mempool_get_bulk(msg_pool, txmsg, fwd_batch_size) < 0) {
+        rte_exit(EXIT_FAILURE, "Cannot get a buffer\n");
+    }
+
+    fwd_start = rte_get_timer_cycles();
+    while (sent < fwd_to_send) {
+        rte_ring_sp_enqueue_bulk(tx, txmsg, fwd_batch_size, NULL);
+        received = rte_ring_sc_dequeue_bulk(rx, rxmsg, fwd_batch_size, NULL);
+        sent += received;
+    }
+    fwd_finish = rte_get_timer_cycles();
+
+    exitting = true;
+
+    rte_mempool_put_bulk(msg_pool, txmsg, fwd_batch_size);
+    rte_free(txmsg);
+    rte_free(rxmsg);
+
+    secs = (float)(fwd_finish - fwd_start)/rte_get_timer_hz();
+    msgpersec = sent/secs;
+    if (msgpersec > 1000000) {
+        msgpersec  = msgpersec / 1000000;
+        msgprefix = "M";
+    } else if (msgpersec > 1000) {
+        msgpersec = msgpersec / 1000;
+        msgprefix = "k";
+    } else {
+        msgprefix = "";
+    }
+
+    printf("Forwarded %f %s msgs/sec\n", msgpersec, msgprefix);
+
     return 0;
 }
 
@@ -98,6 +177,8 @@ main(int argc, char **argv)
     if (!rx) {
         rte_exit(EXIT_FAILURE, "Cannot allocate RX ring\n");
     }
+
+    exitting = false;
 
     lcore_id = rte_get_next_lcore(-1,1,0);
     if (lcore_id == RTE_MAX_LCORE) {
