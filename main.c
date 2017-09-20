@@ -69,7 +69,7 @@ uint64_t fwd_start;
 uint64_t fwd_finish;
 
 static int
-lcore_fwder(__rte_unused void *arg)
+lcore_simple_fwder(__rte_unused void *arg)
 {
     void **msg;
     unsigned int received;
@@ -96,7 +96,7 @@ lcore_fwder(__rte_unused void *arg)
 }
 
 static int
-lcore_prod(__rte_unused void *arg)
+lcore_simple_prod(__rte_unused void *arg)
 {
     void **txmsg;
     void **rxmsg;
@@ -185,14 +185,14 @@ main(int argc, char **argv)
         rte_exit(EXIT_FAILURE, "Not enough lcores\n");
     }
     /* start the forwarder thread */
-    rte_eal_remote_launch(lcore_fwder, NULL, lcore_id);
+    rte_eal_remote_launch(lcore_simple_fwder, NULL, lcore_id);
 
     lcore_id = rte_get_next_lcore(lcore_id,1,0);
     if (lcore_id == RTE_MAX_LCORE) {
         rte_exit(EXIT_FAILURE, "Not enough lcores\n");
     }
     /* start the producer thread */
-    rte_eal_remote_launch(lcore_prod, NULL, lcore_id);
+    rte_eal_remote_launch(lcore_simple_prod, NULL, lcore_id);
 
     /* wait for the threads to finish their jobs */
     rte_eal_mp_wait_lcore();
