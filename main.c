@@ -43,6 +43,15 @@
 #include <rte_eal.h>
 #include <rte_common.h>
 #include <rte_lcore.h>
+#include <rte_mempool.h>
+
+#define MEMPOOL_NAME "MSGPOOL"
+#define MEMPOOL_N 1024
+#define MEMPOOL_ELT_SIZE 84
+#define MEMPOOL_CACHE_SIZE 0
+#define MEMPOOL_PRIV_DATA_SIZE 0
+
+struct rte_mempool *msg_pool;
 
 static int
 lcore_fwder(__rte_unused void *arg)
@@ -66,6 +75,13 @@ main(int argc, char **argv)
     ret = rte_eal_init(argc, argv);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
+    }
+
+    msg_pool = rte_mempool_create(MEMPOOL_NAME, MEMPOOL_N, MEMPOOL_ELT_SIZE,
+                                  MEMPOOL_CACHE_SIZE, MEMPOOL_PRIV_DATA_SIZE,
+                                  NULL, NULL, NULL, NULL, rte_socket_id(), 0);
+    if (!msg_pool) {
+        rte_exit(EXIT_FAILURE, "Cannot allocate mempool\n");
     }
 
     lcore_id = rte_get_next_lcore(-1,1,0);
