@@ -205,7 +205,7 @@ fwder_copy_generator(__rte_unused void *arg)
         msgprefix = "";
     }
 
-    printf("Forwarded %f %s msgs/sec\n", msgpersec, msgprefix);
+    printf("Forwarded %f %smsgs/sec\n", msgpersec, msgprefix);
 
     return 0;
 }
@@ -294,7 +294,7 @@ fwder_generator(__rte_unused void *arg)
         msgprefix = "";
     }
 
-    printf("Forwarded %f %s msgs/sec\n", msgpersec, msgprefix);
+    printf("Forwarded %f %smsgs/sec\n", msgpersec, msgprefix);
 
     return 0;
 }
