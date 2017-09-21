@@ -65,7 +65,7 @@ struct mode {
     const char *name;
     int (*producer) (void *arg);
     int (*consumer) (void *arg);
-    int (*init) (unsigned int batchsize, unsigned long packets);
+    int (*init) (unsigned int batchsize, unsigned long msgs);
     void *priv_data;
 };
 
@@ -76,7 +76,7 @@ static int fwder_copy_generator(__rte_unused void *arg);
 static int fwder_copy(__rte_unused void *arg);
 static int sink_consumer(__rte_unused void *arg);
 static int sink_generator(__rte_unused void *arg);
-static int fwder_init(unsigned int batchsize, unsigned long packets);
+static int fwder_init(unsigned int batchsize, unsigned long msgs);
 struct fwder_data {
     unsigned long fwded;
     unsigned long to_send;
@@ -96,10 +96,10 @@ struct mode modes[] = {
 struct mode *mode_selected;
 
 static int
-fwder_init(unsigned int batchsize, unsigned long packets)
+fwder_init(unsigned int batchsize, unsigned long msgs)
 {
     fwder_priv_data.fwded = 0;
-    fwder_priv_data.to_send = packets;
+    fwder_priv_data.to_send = msgs;
     fwder_priv_data.batch_size = batchsize;
     return 0;
 }
@@ -402,7 +402,8 @@ static void
 usage(const char *prgname)
 {
     printf("Usage: %s [EAL args] -- -m <mode> [mode parameters]\n", prgname);
-    printf("\t--batchsize <number>  set the batch size\n");
+    printf("\t--batchsize <number>\tset the batch size\n");
+    printf("\t--msgs <number>\t\tnumber of msgs to test\n");
     printf("\n");
 }
 
@@ -412,11 +413,12 @@ parse_app_args(char *prgname, int argc, char *argv[])
     int c;
     int optidx;
     unsigned int batchsize = 32;
-    unsigned long packets = 1000000;
+    unsigned long msgs = 1000000;
 
     static struct option long_options[] = {
         {"mode", required_argument, 0, 0 },
         {"batchsize", required_argument, 0, 1 },
+        {"msgs", required_argument, 0, 2 },
         {0, 0, 0, 0 }
     };
 
@@ -442,8 +444,17 @@ parse_app_args(char *prgname, int argc, char *argv[])
             }
             break;
 
+        case 2:
+            msgs = atol(optarg);
+            if (msgs < batchsize) {
+                rte_exit(EXIT_FAILURE, "Invalid num of msgs %ld\n", msgs);
+            }
+            break;
+
+
         default:
             usage(prgname);
+            rte_exit(EXIT_FAILURE, "Invalid cmdline\n");
         }
     }
 
@@ -452,9 +463,9 @@ parse_app_args(char *prgname, int argc, char *argv[])
         rte_exit(EXIT_FAILURE, "No mode selected\n");
     }
 
-    mode_selected->init(batchsize, packets);
-    printf("Mode: %s, batch size: %d, packets %ld\n", mode_selected->name,
-           batchsize, packets);
+    mode_selected->init(batchsize, msgs);
+    printf("Mode: %s, batch size: %d, msgs %ld\n", mode_selected->name,
+           batchsize, msgs);
 
     return 0;
 }
