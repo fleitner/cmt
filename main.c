@@ -80,6 +80,8 @@ static int fwder_simple(__rte_unused void *arg);
 static int fwder_generator(__rte_unused void *arg);
 static int fwder_copy_generator(__rte_unused void *arg);
 static int fwder_copy(__rte_unused void *arg);
+static int sink_consumer(__rte_unused void *arg);
+static int sink_generator(__rte_unused void *arg);
 static int fwder_init(void);
 struct fwder_data {
     unsigned long fwded;
@@ -88,6 +90,8 @@ struct fwder_data {
 } fwder_priv_data;
 
 struct mode modes[] = {
+    { "sink", sink_generator, sink_consumer,
+        fwder_init, (void *)&fwder_priv_data },
     { "fw", fwder_generator, fwder_simple,
         fwder_init, (void *)&fwder_priv_data },
     { "fw-copy", fwder_copy_generator, fwder_copy,
@@ -296,6 +300,89 @@ fwder_generator(__rte_unused void *arg)
 
     printf("Forwarded %f %smsgs/sec\n", msgpersec, msgprefix);
 
+    return 0;
+}
+
+static int
+sink_consumer(__rte_unused void *arg)
+{
+    const char *msgprefix;
+    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
+    unsigned int batch_size = data->batch_size;
+    unsigned int received;
+    unsigned long to_send;
+    unsigned long total;
+    float secs;
+    float msgpersec;
+    uint64_t start;
+    uint64_t finish;
+    void **msg;
+
+    msg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+
+    /* loop until the sender is ready */
+    do {
+        received = rte_ring_sc_dequeue_bulk(tx, msg, batch_size, NULL);
+    } while (received == 0);
+
+    to_send = data->to_send - received;
+    total = 0;
+    start = rte_get_timer_cycles();
+    while (total < to_send) {
+        received = rte_ring_sc_dequeue_bulk(tx, msg, batch_size, NULL);
+        if (received == 0) {
+            continue;
+        }
+
+        total += received;
+    }
+    finish = rte_get_timer_cycles();
+
+    rte_free(msg);
+    secs = (float)(finish - start)/rte_get_timer_hz();
+    msgpersec = total/secs;
+    if (msgpersec > 1000000) {
+        msgpersec  = msgpersec / 1000000;
+        msgprefix = "M";
+    } else if (msgpersec > 1000) {
+        msgpersec = msgpersec / 1000;
+        msgprefix = "k";
+    } else {
+        msgprefix = "";
+    }
+
+    printf("Sink %f %smsgs/sec\n", msgpersec, msgprefix);
+
+    return 0;
+}
+
+static int
+sink_generator(__rte_unused void *arg)
+{
+    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
+    unsigned int batch_size = data->batch_size;
+    unsigned int queued;
+    unsigned long sent;
+    unsigned long to_send = data->to_send;
+    void **txmsg;
+
+    txmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    if (!txmsg) {
+        rte_exit(EXIT_FAILURE, "Cannot get a mem to store buffers\n");
+    }
+
+    if (rte_mempool_get_bulk(msg_pool, txmsg, batch_size) < 0) {
+        rte_exit(EXIT_FAILURE, "Cannot get a buffer\n");
+    }
+
+    sent = 0;
+    while (sent < to_send) {
+        queued = rte_ring_sp_enqueue_bulk(tx, txmsg, batch_size, NULL);
+        sent += queued;
+    }
+
+    rte_mempool_put_bulk(msg_pool, txmsg, batch_size);
+    rte_free(txmsg);
     return 0;
 }
 
