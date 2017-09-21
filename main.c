@@ -76,8 +76,10 @@ struct mode {
 };
 
 
-static int fwder_loop(__rte_unused void *arg);
+static int fwder_simple(__rte_unused void *arg);
 static int fwder_generator(__rte_unused void *arg);
+static int fwder_copy_generator(__rte_unused void *arg);
+static int fwder_copy(__rte_unused void *arg);
 static int fwder_init(void);
 struct fwder_data {
     unsigned long fwded;
@@ -85,9 +87,11 @@ struct fwder_data {
     unsigned int batch_size;
 } fwder_priv_data;
 
-
 struct mode modes[] = {
-    { "fw", fwder_generator, fwder_loop, fwder_init, (void *)&fwder_priv_data },
+    { "fw", fwder_generator, fwder_simple,
+        fwder_init, (void *)&fwder_priv_data },
+    { "fw-copy", fwder_copy_generator, fwder_copy,
+        fwder_init, (void *)&fwder_priv_data },
     { NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -103,7 +107,111 @@ fwder_init(void)
 }
 
 static int
-fwder_loop(__rte_unused void *arg)
+fwder_copy(__rte_unused void *arg)
+{
+    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
+    unsigned int batch_size = data->batch_size;
+    unsigned int received;
+    unsigned int queued;
+    unsigned int i;
+    unsigned long fwded;
+    unsigned long to_send = data->to_send;
+    void **txmsg;
+    void **rxmsg;
+
+    txmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    rxmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+
+    if (rte_mempool_get_bulk(msg_pool, txmsg, batch_size) < 0) {
+        rte_exit(EXIT_FAILURE, "Cannot get a buffer\n");
+    }
+
+
+    fwded = 0;
+    while (fwded < to_send) {
+        received = rte_ring_sc_dequeue_bulk(tx, rxmsg, batch_size, NULL);
+        if (received == 0) {
+            continue;
+        }
+
+        /* copy msg data */
+        for (i = 0; i < received; i++) {
+            rte_memcpy(txmsg[i], rxmsg[i], MEMPOOL_ELT_SIZE);
+        }
+
+        queued = rte_ring_sp_enqueue_bulk(rx, txmsg, received, NULL);
+        while (queued < received) {
+            queued += rte_ring_sp_enqueue_bulk(rx, &txmsg[queued],
+                                               received - queued, NULL);
+        }
+
+        fwded += queued;
+    }
+
+    rte_mempool_put_bulk(msg_pool, txmsg, batch_size);
+    data->fwded = fwded;
+    rte_free(txmsg);
+    rte_free(rxmsg);
+    return 0;
+}
+
+static int
+fwder_copy_generator(__rte_unused void *arg)
+{
+    const char *msgprefix;
+    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
+    unsigned int batch_size = data->batch_size;
+    unsigned int received;
+    unsigned long sent = 0;
+    unsigned long to_send = data->to_send;
+    void **txmsg;
+    void **rxmsg;
+    float secs;
+    float msgpersec;
+    uint64_t start;
+    uint64_t finish;
+
+    txmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    rxmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    if (!txmsg || !rxmsg) {
+        rte_exit(EXIT_FAILURE, "Cannot get a mem to store buffers\n");
+    }
+
+    if (rte_mempool_get_bulk(msg_pool, txmsg, batch_size) < 0) {
+        rte_exit(EXIT_FAILURE, "Cannot get a buffer\n");
+    }
+
+    start = rte_get_timer_cycles();
+    while (sent < to_send) {
+        rte_ring_sp_enqueue_bulk(tx, txmsg, batch_size, NULL);
+        received = rte_ring_sc_dequeue_bulk(rx, rxmsg, batch_size, NULL);
+        sent += received;
+    }
+    finish = rte_get_timer_cycles();
+
+    rte_mempool_put_bulk(msg_pool, txmsg, batch_size);
+    rte_free(txmsg);
+    rte_free(rxmsg);
+
+    secs = (float)(finish - start)/rte_get_timer_hz();
+    msgpersec = sent/secs;
+    if (msgpersec > 1000000) {
+        msgpersec  = msgpersec / 1000000;
+        msgprefix = "M";
+    } else if (msgpersec > 1000) {
+        msgpersec = msgpersec / 1000;
+        msgprefix = "k";
+    } else {
+        msgprefix = "";
+    }
+
+    printf("Forwarded %f %s msgs/sec\n", msgpersec, msgprefix);
+
+    return 0;
+}
+
+static int
+fwder_simple(__rte_unused void *arg)
 {
     struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
     unsigned int batch_size = data->batch_size;
