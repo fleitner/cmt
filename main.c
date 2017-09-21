@@ -61,17 +61,11 @@ struct rte_mempool *msg_pool;
 struct rte_ring *tx;
 struct rte_ring *rx;
 
-static void
-usage(const char *prgname)
-{
-    printf("Usage: %s [EAL args] -- -m <mode> [mode parameters]\n\n", prgname);
-}
-
 struct mode {
     const char *name;
     int (*producer) (void *arg);
     int (*consumer) (void *arg);
-    int (*init) (void);
+    int (*init) (unsigned int batchsize, unsigned long packets);
     void *priv_data;
 };
 
@@ -82,7 +76,7 @@ static int fwder_copy_generator(__rte_unused void *arg);
 static int fwder_copy(__rte_unused void *arg);
 static int sink_consumer(__rte_unused void *arg);
 static int sink_generator(__rte_unused void *arg);
-static int fwder_init(void);
+static int fwder_init(unsigned int batchsize, unsigned long packets);
 struct fwder_data {
     unsigned long fwded;
     unsigned long to_send;
@@ -102,11 +96,11 @@ struct mode modes[] = {
 struct mode *mode_selected;
 
 static int
-fwder_init(void)
+fwder_init(unsigned int batchsize, unsigned long packets)
 {
     fwder_priv_data.fwded = 0;
-    fwder_priv_data.to_send = 1000000000;
-    fwder_priv_data.batch_size = 32;
+    fwder_priv_data.to_send = packets;
+    fwder_priv_data.batch_size = batchsize;
     return 0;
 }
 
@@ -404,16 +398,27 @@ parse_app_mode(char *modestr)
     return -1;
 }
 
+static void
+usage(const char *prgname)
+{
+    printf("Usage: %s [EAL args] -- -m <mode> [mode parameters]\n", prgname);
+    printf("\t--batchsize <number>  set the batch size\n");
+    printf("\n");
+}
+
 static int
 parse_app_args(char *prgname, int argc, char *argv[])
 {
     int c;
     int optidx;
+    unsigned int batchsize = 32;
+    unsigned long packets = 1000000;
 
-	static struct option long_options[] = {
-		{"mode", required_argument, 0, 0 },
+    static struct option long_options[] = {
+        {"mode", required_argument, 0, 0 },
+        {"batchsize", required_argument, 0, 1 },
         {0, 0, 0, 0 }
-	};
+    };
 
     while (1) {
         c = getopt_long(argc, argv, "", long_options, &optidx);
@@ -429,17 +434,29 @@ parse_app_args(char *prgname, int argc, char *argv[])
                 rte_exit(EXIT_FAILURE, "Invalid mode\n");
             }
 
-            if (mode_selected->init) {
-                mode_selected->init();
-            }
-            printf("Selected mode: %s\n", mode_selected->name);
             break;
+        case 1:
+            batchsize = atoi(optarg);
+            if (batchsize < 1 || batchsize > 128) {
+                rte_exit(EXIT_FAILURE, "Invalid batchsize %d\n", batchsize);
+            }
+            break;
+
         default:
             usage(prgname);
         }
     }
 
-	return 0;
+    if (!mode_selected) {
+        usage(prgname);
+        rte_exit(EXIT_FAILURE, "No mode selected\n");
+    }
+
+    mode_selected->init(batchsize, packets);
+    printf("Mode: %s, batch size: %d, packets %ld\n", mode_selected->name,
+           batchsize, packets);
+
+    return 0;
 }
 
 int
