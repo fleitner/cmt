@@ -40,6 +40,8 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <getopt.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -59,26 +61,63 @@ struct rte_mempool *msg_pool;
 struct rte_ring *tx;
 struct rte_ring *rx;
 
-bool exitting;
+static void
+usage(const char *prgname)
+{
+    printf("Usage: %s [EAL args] -- -m <mode> [mode parameters]\n\n", prgname);
+}
 
-/* Forwarder */
-unsigned long fwded = 0;
-unsigned long fwd_to_send = 1000000000;
-unsigned int fwd_batch_size = 32;
-uint64_t fwd_start;
-uint64_t fwd_finish;
+struct mode {
+    const char *name;
+    int (*producer) (void *arg);
+    int (*consumer) (void *arg);
+    int (*init) (void);
+    void *priv_data;
+};
+
+
+static int fwder_loop(__rte_unused void *arg);
+static int fwder_generator(__rte_unused void *arg);
+static int fwder_init(void);
+struct fwder_data {
+    unsigned long fwded;
+    unsigned long to_send;
+    unsigned int batch_size;
+} fwder_priv_data;
+
+
+struct mode modes[] = {
+    { "fw", fwder_generator, fwder_loop, fwder_init, (void *)&fwder_priv_data },
+    { NULL, NULL, NULL, NULL, NULL }
+};
+
+struct mode *mode_selected;
 
 static int
-lcore_simple_fwder(__rte_unused void *arg)
+fwder_init(void)
 {
-    void **msg;
+    fwder_priv_data.fwded = 0;
+    fwder_priv_data.to_send = 1000000000;
+    fwder_priv_data.batch_size = 32;
+    return 0;
+}
+
+static int
+fwder_loop(__rte_unused void *arg)
+{
+    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
+    unsigned int batch_size = data->batch_size;
     unsigned int received;
     unsigned int queued;
+    unsigned long fwded;
+    unsigned long to_send = data->to_send;
+    void **msg;
 
-    msg = rte_malloc(NULL, sizeof(void *) * fwd_batch_size, 0);
+    msg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
 
-    while (!exitting) {
-        received = rte_ring_sc_dequeue_bulk(tx, msg, fwd_batch_size, NULL);
+    fwded = 0;
+    while (fwded < to_send) {
+        received = rte_ring_sc_dequeue_bulk(tx, msg, batch_size, NULL);
         if (received == 0) {
             continue;
         }
@@ -91,46 +130,51 @@ lcore_simple_fwder(__rte_unused void *arg)
 
         fwded += queued;
     }
+
+    data->fwded = fwded;
     rte_free(msg);
     return 0;
 }
 
 static int
-lcore_simple_prod(__rte_unused void *arg)
+fwder_generator(__rte_unused void *arg)
 {
+    const char *msgprefix;
+    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
+    unsigned int batch_size = data->batch_size;
+    unsigned int received;
+    unsigned long sent = 0;
+    unsigned long to_send = data->to_send;
     void **txmsg;
     void **rxmsg;
-    unsigned long sent = 0;
-    unsigned int received;
     float secs;
     float msgpersec;
-    const char *msgprefix;
+    uint64_t start;
+    uint64_t finish;
 
-    txmsg = rte_malloc(NULL, sizeof(void *) * fwd_batch_size, 0);
-    rxmsg = rte_malloc(NULL, sizeof(void *) * fwd_batch_size, 0);
+    txmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    rxmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
     if (!txmsg || !rxmsg) {
         rte_exit(EXIT_FAILURE, "Cannot get a mem to store buffers\n");
     }
 
-    if (rte_mempool_get_bulk(msg_pool, txmsg, fwd_batch_size) < 0) {
+    if (rte_mempool_get_bulk(msg_pool, txmsg, batch_size) < 0) {
         rte_exit(EXIT_FAILURE, "Cannot get a buffer\n");
     }
 
-    fwd_start = rte_get_timer_cycles();
-    while (sent < fwd_to_send) {
-        rte_ring_sp_enqueue_bulk(tx, txmsg, fwd_batch_size, NULL);
-        received = rte_ring_sc_dequeue_bulk(rx, rxmsg, fwd_batch_size, NULL);
+    start = rte_get_timer_cycles();
+    while (sent < to_send) {
+        rte_ring_sp_enqueue_bulk(tx, txmsg, batch_size, NULL);
+        received = rte_ring_sc_dequeue_bulk(rx, rxmsg, batch_size, NULL);
         sent += received;
     }
-    fwd_finish = rte_get_timer_cycles();
+    finish = rte_get_timer_cycles();
 
-    exitting = true;
-
-    rte_mempool_put_bulk(msg_pool, txmsg, fwd_batch_size);
+    rte_mempool_put_bulk(msg_pool, txmsg, batch_size);
     rte_free(txmsg);
     rte_free(rxmsg);
 
-    secs = (float)(fwd_finish - fwd_start)/rte_get_timer_hz();
+    secs = (float)(finish - start)/rte_get_timer_hz();
     msgpersec = sent/secs;
     if (msgpersec > 1000000) {
         msgpersec  = msgpersec / 1000000;
@@ -147,16 +191,82 @@ lcore_simple_prod(__rte_unused void *arg)
     return 0;
 }
 
+static int
+parse_app_mode(char *modestr)
+{
+    int i;
+
+    i = 0;
+    while (modes[i].name) {
+        if (!strcmp(modestr, modes[i].name)) {
+            mode_selected = &modes[i];
+            return 0;
+        }
+        i++;
+    }
+
+    mode_selected = NULL;
+    return -1;
+}
+
+static int
+parse_app_args(char *prgname, int argc, char *argv[])
+{
+    int c;
+    int optidx;
+
+	static struct option long_options[] = {
+		{"mode", required_argument, 0, 0 },
+        {0, 0, 0, 0 }
+	};
+
+    while (1) {
+        c = getopt_long(argc, argv, "", long_options, &optidx);
+
+        if (c == -1) {
+            break;
+        }
+
+        switch (c) {
+        case 0:
+            if (parse_app_mode(optarg) < 0) {
+                usage(prgname);
+                rte_exit(EXIT_FAILURE, "Invalid mode\n");
+            }
+
+            if (mode_selected->init) {
+                mode_selected->init();
+            }
+            printf("Selected mode: %s\n", mode_selected->name);
+            break;
+        default:
+            usage(prgname);
+        }
+    }
+
+	return 0;
+}
 
 int
 main(int argc, char **argv)
 {
+    char *prgname = argv[0];
     unsigned int lcore_id;
     int ret;
+
+    mode_selected = NULL;
 
     ret = rte_eal_init(argc, argv);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
+    }
+
+    /* skip EAL arguments */
+    argc -= ret;
+    argv += ret;
+    ret = parse_app_args(prgname, argc, argv);
+    if (ret < 0) {
+        rte_exit(EXIT_FAILURE, "Invalid command-line arguments\n");
     }
 
     msg_pool = rte_mempool_create(MEMPOOL_NAME, MEMPOOL_N, MEMPOOL_ELT_SIZE,
@@ -178,21 +288,19 @@ main(int argc, char **argv)
         rte_exit(EXIT_FAILURE, "Cannot allocate RX ring\n");
     }
 
-    exitting = false;
-
     lcore_id = rte_get_next_lcore(-1,1,0);
     if (lcore_id == RTE_MAX_LCORE) {
         rte_exit(EXIT_FAILURE, "Not enough lcores\n");
     }
-    /* start the forwarder thread */
-    rte_eal_remote_launch(lcore_simple_fwder, NULL, lcore_id);
+    /* start the consumer thread */
+    rte_eal_remote_launch(mode_selected->consumer, NULL, lcore_id);
 
     lcore_id = rte_get_next_lcore(lcore_id,1,0);
     if (lcore_id == RTE_MAX_LCORE) {
         rte_exit(EXIT_FAILURE, "Not enough lcores\n");
     }
     /* start the producer thread */
-    rte_eal_remote_launch(lcore_simple_prod, NULL, lcore_id);
+    rte_eal_remote_launch(mode_selected->producer, NULL, lcore_id);
 
     /* wait for the threads to finish their jobs */
     rte_eal_mp_wait_lcore();
