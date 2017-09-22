@@ -61,15 +61,6 @@ struct rte_mempool *msg_pool;
 struct rte_ring *tx;
 struct rte_ring *rx;
 
-struct mode {
-    const char *name;
-    int (*producer) (void *arg);
-    int (*consumer) (void *arg);
-    int (*init) (unsigned int batchsize, unsigned long msgs);
-    void *priv_data;
-};
-
-
 static int fwder_simple(__rte_unused void *arg);
 static int fwder_generator(__rte_unused void *arg);
 static int fwder_copy_generator(__rte_unused void *arg);
@@ -77,43 +68,47 @@ static int fwder_copy(__rte_unused void *arg);
 static int sink_consumer(__rte_unused void *arg);
 static int sink_generator(__rte_unused void *arg);
 static int fwder_init(unsigned int batchsize, unsigned long msgs);
-struct fwder_data {
-    unsigned long fwded;
+
+struct mode {
+    const char *name;
+    int (*producer) (void *arg);
+    int (*consumer) (void *arg);
+    int (*init) (unsigned int batchsize, unsigned long msgs);
+    unsigned long result;
     unsigned long to_send;
     unsigned int batch_size;
-} fwder_priv_data;
-
-struct mode modes[] = {
-    { "sink", sink_generator, sink_consumer,
-        fwder_init, (void *)&fwder_priv_data },
-    { "fw", fwder_generator, fwder_simple,
-        fwder_init, (void *)&fwder_priv_data },
-    { "fw-copy", fwder_copy_generator, fwder_copy,
-        fwder_init, (void *)&fwder_priv_data },
-    { NULL, NULL, NULL, NULL, NULL }
 };
 
 struct mode *mode_selected;
 
+struct mode modes[] = {
+    { "sink", sink_generator, sink_consumer,
+        fwder_init, 0, 0 , 0 },
+    { "fw", fwder_generator, fwder_simple,
+        fwder_init, 0, 0, 0 },
+    { "fw-copy", fwder_copy_generator, fwder_copy,
+        fwder_init, 0, 0, 0 },
+    { NULL, NULL, NULL, NULL, 0, 0, 0 }
+};
+
 static int
 fwder_init(unsigned int batchsize, unsigned long msgs)
 {
-    fwder_priv_data.fwded = 0;
-    fwder_priv_data.to_send = msgs;
-    fwder_priv_data.batch_size = batchsize;
+    mode_selected->result = 0;
+    mode_selected->to_send = msgs;
+    mode_selected->batch_size = batchsize;
     return 0;
 }
 
 static int
 fwder_copy(__rte_unused void *arg)
 {
-    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
-    unsigned int batch_size = data->batch_size;
+    unsigned int batch_size = mode_selected->batch_size;
     unsigned int received;
     unsigned int queued;
     unsigned int i;
     unsigned long fwded;
-    unsigned long to_send = data->to_send;
+    unsigned long to_send = mode_selected->to_send;
     void **txmsg;
     void **rxmsg;
 
@@ -147,7 +142,7 @@ fwder_copy(__rte_unused void *arg)
     }
 
     rte_mempool_put_bulk(msg_pool, txmsg, batch_size);
-    data->fwded = fwded;
+    mode_selected->result = fwded;
     rte_free(txmsg);
     rte_free(rxmsg);
     return 0;
@@ -157,11 +152,10 @@ static int
 fwder_copy_generator(__rte_unused void *arg)
 {
     const char *msgprefix;
-    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
-    unsigned int batch_size = data->batch_size;
+    unsigned int batch_size = mode_selected->batch_size;
     unsigned int received;
     unsigned long sent = 0;
-    unsigned long to_send = data->to_send;
+    unsigned long to_send = mode_selected->to_send;
     void **txmsg;
     void **rxmsg;
     float secs;
@@ -211,12 +205,11 @@ fwder_copy_generator(__rte_unused void *arg)
 static int
 fwder_simple(__rte_unused void *arg)
 {
-    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
-    unsigned int batch_size = data->batch_size;
+    unsigned int batch_size = mode_selected->batch_size;
     unsigned int received;
     unsigned int queued;
     unsigned long fwded;
-    unsigned long to_send = data->to_send;
+    unsigned long to_send = mode_selected->to_send;
     void **msg;
 
     msg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
@@ -237,7 +230,7 @@ fwder_simple(__rte_unused void *arg)
         fwded += queued;
     }
 
-    data->fwded = fwded;
+    mode_selected->result = fwded;
     rte_free(msg);
     return 0;
 }
@@ -246,11 +239,10 @@ static int
 fwder_generator(__rte_unused void *arg)
 {
     const char *msgprefix;
-    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
-    unsigned int batch_size = data->batch_size;
+    unsigned int batch_size = mode_selected->batch_size;
     unsigned int received;
     unsigned long sent = 0;
-    unsigned long to_send = data->to_send;
+    unsigned long to_send = mode_selected->to_send;
     void **txmsg;
     void **rxmsg;
     float secs;
@@ -301,8 +293,7 @@ static int
 sink_consumer(__rte_unused void *arg)
 {
     const char *msgprefix;
-    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
-    unsigned int batch_size = data->batch_size;
+    unsigned int batch_size = mode_selected->batch_size;
     unsigned int received;
     unsigned long to_send;
     unsigned long total;
@@ -319,7 +310,7 @@ sink_consumer(__rte_unused void *arg)
         received = rte_ring_sc_dequeue_bulk(tx, msg, batch_size, NULL);
     } while (received == 0);
 
-    to_send = data->to_send - received;
+    to_send = mode_selected->to_send - received;
     total = 0;
     start = rte_get_timer_cycles();
     while (total < to_send) {
@@ -353,11 +344,10 @@ sink_consumer(__rte_unused void *arg)
 static int
 sink_generator(__rte_unused void *arg)
 {
-    struct fwder_data *data = (struct fwder_data *)mode_selected->priv_data;
-    unsigned int batch_size = data->batch_size;
+    unsigned int batch_size = mode_selected->batch_size;
     unsigned int queued;
     unsigned long sent;
-    unsigned long to_send = data->to_send;
+    unsigned long to_send = mode_selected->to_send;
     void **txmsg;
 
     txmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
