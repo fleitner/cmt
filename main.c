@@ -66,6 +66,8 @@ static int fwder_copy_generator(__rte_unused void *arg);
 static int fwder_copy(__rte_unused void *arg);
 static int sink_consumer(__rte_unused void *arg);
 static int sink_generator(__rte_unused void *arg);
+static int fwder_pvp(__rte_unused void *arg);
+static int fwder_pvp_generator(__rte_unused void *arg);
 static int fwder_init(unsigned int batchsize, unsigned long msgs,
                       unsigned int msglen);
 
@@ -90,6 +92,8 @@ struct mode modes[] = {
         fwder_init, 0, 0, 0, 0},
     { "fw-copy", fwder_copy_generator, fwder_copy,
         fwder_init, 0, 0, 0, 0 },
+    { "pvp", fwder_pvp, fwder_pvp_generator,
+        fwder_init, 0, 0, 0, 0 },
     { NULL, NULL, NULL, NULL, 0, 0, 0, 0 }
 };
 
@@ -100,6 +104,112 @@ fwder_init(unsigned int batchsize, unsigned long msgs, unsigned int msglen)
     mode_selected->to_send = msgs;
     mode_selected->batch_size = batchsize;
     mode_selected->msglen = msglen;
+    return 0;
+}
+
+static int
+fwder_pvp(__rte_unused void *arg)
+{
+    unsigned int batch_size = mode_selected->batch_size;
+    unsigned int received;
+    unsigned int queued;
+    unsigned long fwded;
+    unsigned long to_send = mode_selected->to_send;
+    void **msg;
+
+    /* this should simulate testpmd with burst I/O forward. */
+    msg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+
+    fwded = 0;
+    while (fwded < to_send) {
+        received = rte_ring_sc_dequeue_bulk(tx, msg, batch_size, NULL);
+        if (received == 0) {
+            continue;
+        }
+
+        queued = rte_ring_sp_enqueue_bulk(rx, msg, received, NULL);
+        while (queued < received) {
+            queued += rte_ring_sp_enqueue_bulk(rx, &msg[queued],
+                                               received - queued, NULL);
+        }
+
+        fwded += queued;
+    }
+
+    mode_selected->result = fwded;
+    rte_free(msg);
+    return 0;
+}
+
+static int
+fwder_pvp_generator(__rte_unused void *arg)
+{
+    const char *msgprefix;
+    unsigned int batch_size = mode_selected->batch_size;
+    unsigned int msglen = mode_selected->msglen;
+    unsigned int received;
+    unsigned int i;
+    unsigned long sent = 0;
+    unsigned long to_send = mode_selected->to_send;
+    void **txmsg;
+    void **rxmsg;
+    void **vhubuf;
+    float secs;
+    float msgpersec;
+    uint64_t start;
+    uint64_t finish;
+
+    txmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    rxmsg = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    vhubuf = rte_malloc(NULL, sizeof(void *) * batch_size, 0);
+    if (!txmsg || !rxmsg || !vhubuf) {
+        rte_exit(EXIT_FAILURE, "Cannot get a mem to store buffers\n");
+    }
+
+    if (rte_mempool_get_bulk(msg_pool, txmsg, batch_size) < 0) {
+        rte_exit(EXIT_FAILURE, "Cannot get a buffer\n");
+    }
+
+    if (rte_mempool_get_bulk(msg_pool, vhubuf, batch_size) < 0) {
+        rte_exit(EXIT_FAILURE, "Cannot get a buffer\n");
+    }
+
+    start = rte_get_timer_cycles();
+    while (sent < to_send) {
+        /* simulate the copy from vswitch to virtio */
+        for (i = 0; i < batch_size; i++) {
+            rte_memcpy(txmsg[i], vhubuf[i], msglen);
+        }
+        rte_ring_sp_enqueue_bulk(tx, txmsg, batch_size, NULL);
+        received = rte_ring_sc_dequeue_bulk(rx, rxmsg, batch_size, NULL);
+        /* simulate the copy from virtio to vswitch*/
+        for (i = 0; i < received; i++) {
+            rte_memcpy(txmsg[i], vhubuf[i], msglen);
+        }
+        sent += received;
+    }
+    finish = rte_get_timer_cycles();
+
+    rte_mempool_put_bulk(msg_pool, txmsg, batch_size);
+    rte_mempool_put_bulk(msg_pool, vhubuf, batch_size);
+    rte_free(txmsg);
+    rte_free(rxmsg);
+    rte_free(vhubuf);
+
+    secs = (float)(finish - start)/rte_get_timer_hz();
+    msgpersec = sent/secs;
+    if (msgpersec > 1000000) {
+        msgpersec  = msgpersec / 1000000;
+        msgprefix = "M";
+    } else if (msgpersec > 1000) {
+        msgpersec = msgpersec / 1000;
+        msgprefix = "k";
+    } else {
+        msgprefix = "";
+    }
+
+    printf("Forwarded %f %smsgs/sec\n", msgpersec, msgprefix);
+
     return 0;
 }
 
