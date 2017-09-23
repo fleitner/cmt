@@ -53,7 +53,6 @@
 
 #define MEMPOOL_NAME "MSGPOOL"
 #define MEMPOOL_N 1024
-#define MEMPOOL_ELT_SIZE 84
 #define MEMPOOL_CACHE_SIZE 0
 #define MEMPOOL_PRIV_DATA_SIZE 0
 
@@ -67,36 +66,40 @@ static int fwder_copy_generator(__rte_unused void *arg);
 static int fwder_copy(__rte_unused void *arg);
 static int sink_consumer(__rte_unused void *arg);
 static int sink_generator(__rte_unused void *arg);
-static int fwder_init(unsigned int batchsize, unsigned long msgs);
+static int fwder_init(unsigned int batchsize, unsigned long msgs,
+                      unsigned int msglen);
 
 struct mode {
     const char *name;
     int (*producer) (void *arg);
     int (*consumer) (void *arg);
-    int (*init) (unsigned int batchsize, unsigned long msgs);
+    int (*init) (unsigned int batchsize, unsigned long msgs,
+                 unsigned int msglen);
     unsigned long result;
     unsigned long to_send;
     unsigned int batch_size;
+    unsigned int msglen;
 };
 
 struct mode *mode_selected;
 
 struct mode modes[] = {
     { "sink", sink_generator, sink_consumer,
-        fwder_init, 0, 0 , 0 },
+        fwder_init, 0, 0 , 0, 0 },
     { "fw", fwder_generator, fwder_simple,
-        fwder_init, 0, 0, 0 },
+        fwder_init, 0, 0, 0, 0},
     { "fw-copy", fwder_copy_generator, fwder_copy,
-        fwder_init, 0, 0, 0 },
-    { NULL, NULL, NULL, NULL, 0, 0, 0 }
+        fwder_init, 0, 0, 0, 0 },
+    { NULL, NULL, NULL, NULL, 0, 0, 0, 0 }
 };
 
 static int
-fwder_init(unsigned int batchsize, unsigned long msgs)
+fwder_init(unsigned int batchsize, unsigned long msgs, unsigned int msglen)
 {
     mode_selected->result = 0;
     mode_selected->to_send = msgs;
     mode_selected->batch_size = batchsize;
+    mode_selected->msglen = msglen;
     return 0;
 }
 
@@ -104,6 +107,7 @@ static int
 fwder_copy(__rte_unused void *arg)
 {
     unsigned int batch_size = mode_selected->batch_size;
+    unsigned int msglen = mode_selected->msglen;
     unsigned int received;
     unsigned int queued;
     unsigned int i;
@@ -129,7 +133,7 @@ fwder_copy(__rte_unused void *arg)
 
         /* copy msg data */
         for (i = 0; i < received; i++) {
-            rte_memcpy(txmsg[i], rxmsg[i], MEMPOOL_ELT_SIZE);
+            rte_memcpy(txmsg[i], rxmsg[i], msglen);
         }
 
         queued = rte_ring_sp_enqueue_bulk(rx, txmsg, received, NULL);
@@ -394,6 +398,7 @@ usage(const char *prgname)
     printf("Usage: %s [EAL args] -- -m <mode> [mode parameters]\n", prgname);
     printf("\t--batchsize <number>\tset the batch size\n");
     printf("\t--msgs <number>\t\tnumber of msgs to test\n");
+    printf("\t--msglen <length>\t\tlength of msgs to test\n");
     printf("\n");
 }
 
@@ -403,12 +408,14 @@ parse_app_args(char *prgname, int argc, char *argv[])
     int c;
     int optidx;
     unsigned int batchsize = 32;
+    unsigned int msglen = 84;
     unsigned long msgs = 1000000;
 
     static struct option long_options[] = {
         {"mode", required_argument, 0, 0 },
         {"batchsize", required_argument, 0, 1 },
         {"msgs", required_argument, 0, 2 },
+        {"msglen", required_argument, 0, 3 },
         {0, 0, 0, 0 }
     };
 
@@ -441,6 +448,12 @@ parse_app_args(char *prgname, int argc, char *argv[])
             }
             break;
 
+        case 3:
+            msglen = atoi(optarg);
+            if (msglen < 1) {
+                rte_exit(EXIT_FAILURE, "Invalid msglen %d\n", msglen);
+            }
+            break;
 
         default:
             usage(prgname);
@@ -453,9 +466,9 @@ parse_app_args(char *prgname, int argc, char *argv[])
         rte_exit(EXIT_FAILURE, "No mode selected\n");
     }
 
-    mode_selected->init(batchsize, msgs);
-    printf("Mode: %s, batch size: %d, msgs %ld\n", mode_selected->name,
-           batchsize, msgs);
+    mode_selected->init(batchsize, msgs, msglen);
+    printf("Mode: %s, batch size: %d, msgs %ld, msglen %d\n",
+           mode_selected->name, batchsize, msgs, msglen);
 
     return 0;
 }
@@ -482,9 +495,10 @@ main(int argc, char **argv)
         rte_exit(EXIT_FAILURE, "Invalid command-line arguments\n");
     }
 
-    msg_pool = rte_mempool_create(MEMPOOL_NAME, MEMPOOL_N, MEMPOOL_ELT_SIZE,
-                                  MEMPOOL_CACHE_SIZE, MEMPOOL_PRIV_DATA_SIZE,
-                                  NULL, NULL, NULL, NULL, rte_socket_id(), 0);
+    msg_pool = rte_mempool_create(MEMPOOL_NAME, MEMPOOL_N,
+                                  mode_selected->msglen, MEMPOOL_CACHE_SIZE,
+                                  MEMPOOL_PRIV_DATA_SIZE, NULL, NULL, NULL,
+                                  NULL, rte_socket_id(), 0);
     if (!msg_pool) {
         rte_exit(EXIT_FAILURE, "Cannot allocate mempool\n");
     }
